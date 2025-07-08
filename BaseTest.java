@@ -3,15 +3,18 @@ public class BaseTest {
     protected static SessionFactory greenplumSessionFactory;
     protected static SessionFactory hadoopSessionFactory;
 
+    // Greenplum thread-local переменные
     private static final ThreadLocal<Subject> greenplumKerberosTicket = new ThreadLocal<>();
     protected static final ThreadLocal<Session> greenplumSession = new ThreadLocal<>();
     protected static final ThreadLocal<Transaction> greenplumTransaction = new ThreadLocal<>();
     protected static final ThreadLocal<BaseDaoGreenplum> baseDaoGreenplum = new ThreadLocal<>();
-    protected static final ThreadLocal<TestUtil> testUtil = new ThreadLocal<>();
 
-    protected Session hadoopSession;
-    protected Transaction hadoopTransaction;
-    protected BaseDaoHadoop baseDaoHadoop;
+    // Hadoop thread-local переменные
+    protected static final ThreadLocal<Session> hadoopSession = new ThreadLocal<>();
+    protected static final ThreadLocal<Transaction> hadoopTransaction = new ThreadLocal<>();
+    protected static final ThreadLocal<BaseDaoHadoop> baseDaoHadoop = new ThreadLocal<>();
+
+    protected static final ThreadLocal<TestUtil> testUtil = new ThreadLocal<>();
     protected SoftAssert softly;
 
     protected static Properties credentials;
@@ -56,35 +59,42 @@ public class BaseTest {
         try {
             Subject.doAs(greenplumKerberosTicket.get(), (PrivilegedAction<Object>) () -> {
                 if (settings.getProperty("connectToGreenplum").equals("true")) {
-                    Session session = greenplumSessionFactory.openSession();
-                    greenplumSession.set(session);
-                    getLog(BaseTest.class).info("Greenplum session opened: {}", session.hashCode());
+                    Session gpSession = greenplumSessionFactory.openSession();
+                    greenplumSession.set(gpSession);
+                    getLog(BaseTest.class).info("Greenplum session opened: {}", gpSession.hashCode());
 
-                    if (session == null || !session.isOpen()) {
+                    if (gpSession == null || !gpSession.isOpen()) {
                         throw new RuntimeException("Greenplum session is null or not open");
                     }
 
-                    Transaction transaction = session.beginTransaction();
-                    greenplumTransaction.set(transaction);
+                    Transaction gpTransaction = gpSession.beginTransaction();
+                    greenplumTransaction.set(gpTransaction);
 
                     getLog(BaseTest.class).info("Greenplum transaction {} started for session {}",
-                            transaction.hashCode(), session.hashCode());
+                            gpTransaction.hashCode(), gpSession.hashCode());
 
-                    BaseDaoGreenplum dao = new BaseDaoGreenplumImpl(session, transaction);
-                    baseDaoGreenplum.set(dao);
+                    baseDaoGreenplum.set(new BaseDaoGreenplumImpl(gpSession, gpTransaction));
                 }
 
                 if (settings.getProperty("connectToHadoop").equals("true")) {
-                    hadoopSession = hadoopSessionFactory.openSession();
-                    hadoopTransaction = hadoopSession.beginTransaction();
-                    baseDaoHadoop = new BaseDaoHadoopImpl(hadoopSession);
-                    getLog(BaseTest.class).info("Hadoop transaction started");
+                    Session hdSession = hadoopSessionFactory.openSession();
+                    hadoopSession.set(hdSession);
+
+                    Transaction hdTransaction = hdSession.beginTransaction();
+                    hadoopTransaction.set(hdTransaction);
+
+                    baseDaoHadoop.set(new BaseDaoHadoopImpl(hdSession));
+                    getLog(BaseTest.class).info("Hadoop transaction started: {}", hdTransaction.hashCode());
                 }
 
                 softly = new SoftAssert();
 
-                testUtil.set(new TestUtil(greenplumSession.get(), greenplumTransaction.get(), softly,
-                        baseDaoGreenplum.get(), baseDaoHadoop));
+                testUtil.set(new TestUtil(
+                        greenplumSession.get(),
+                        greenplumTransaction.get(),
+                        softly,
+                        baseDaoGreenplum.get(),
+                        baseDaoHadoop.get()));
 
                 return null;
             });
@@ -98,19 +108,15 @@ public class BaseTest {
     @Step("Закрытие Session")
     public void closeSession() {
         try {
-            Transaction transaction = greenplumTransaction.get();
-            Session session = greenplumSession.get();
-
-            if (transaction != null && transaction.isActive()) {
-                transaction.commit();
-                getLog(BaseTest.class).info("Greenplum transaction commit {}", transaction.hashCode());
+            if (greenplumTransaction.get() != null && greenplumTransaction.get().isActive()) {
+                greenplumTransaction.get().commit();
+                getLog(BaseTest.class).info("Greenplum transaction commit {}", greenplumTransaction.get().hashCode());
             }
         } catch (Exception e) {
-            Transaction transaction = greenplumTransaction.get();
-            if (transaction != null && transaction.isActive()) {
-                transaction.rollback();
+            if (greenplumTransaction.get() != null && greenplumTransaction.get().isActive()) {
+                greenplumTransaction.get().rollback();
             }
-            getLog(BaseTest.class).error("Error in Greenplum transaction commit", e);
+            getLog(BaseTest.class).error("Ошибка при коммите транзакции Greenplum", e);
         } finally {
             Session gpSession = greenplumSession.get();
             if (gpSession != null && gpSession.isOpen()) {
@@ -118,16 +124,23 @@ public class BaseTest {
                 getLog(BaseTest.class).info("Greenplum session closed: {}", gpSession.hashCode());
             }
 
+            Session hdSession = hadoopSession.get();
+            if (hdSession != null && hdSession.isOpen()) {
+                hdSession.close();
+                getLog(BaseTest.class).info("Hadoop session closed: {}", hdSession.hashCode());
+            }
+
+            // Очистка всех ThreadLocal переменных
             greenplumTransaction.remove();
             greenplumSession.remove();
             baseDaoGreenplum.remove();
+
+            hadoopTransaction.remove();
+            hadoopSession.remove();
+            baseDaoHadoop.remove();
+
             testUtil.remove();
             greenplumKerberosTicket.remove();
-
-            if (hadoopSession != null && hadoopSession.isOpen()) {
-                hadoopSession.close();
-                getLog(BaseTest.class).info("Hadoop session closed");
-            }
         }
     }
 
@@ -167,7 +180,7 @@ public class BaseTest {
         }
     }
 
-    // Геттеры для использования в тестах, если требуется
+    // Геттеры для использования в тестах
     protected Session getGreenplumSession() {
         return greenplumSession.get();
     }
@@ -178,6 +191,18 @@ public class BaseTest {
 
     protected BaseDaoGreenplum getBaseDaoGreenplum() {
         return baseDaoGreenplum.get();
+    }
+
+    protected Session getHadoopSession() {
+        return hadoopSession.get();
+    }
+
+    protected Transaction getHadoopTransaction() {
+        return hadoopTransaction.get();
+    }
+
+    protected BaseDaoHadoop getBaseDaoHadoop() {
+        return baseDaoHadoop.get();
     }
 
     protected TestUtil getTestUtil() {
