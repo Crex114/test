@@ -1,0 +1,106 @@
+// Название дополнительной ETL-сюиты, которая может быть добавлена в зависимости от параметров
+ext {
+    etlSuiteName = "etl"
+}
+
+// Метод, определяющий, нужно ли запускать задачу test вообще
+def shouldRunTestTask() {
+    def basePath = 'src/test/resources/suites/'
+    def testSuitesParam = project.hasProperty('testSuites') ? project.testSuites : null
+    def wfNamesParam = System.getProperty("wfNames")
+    def suitesDir = new File(basePath)
+
+    // Определяем, были ли переданы параметры testSuites или wfNames
+    def isTestSuitesProvided = testSuitesParam != null
+    def isWfNamesProvided = wfNamesParam != null && !wfNamesParam.trim().isEmpty()
+    def hasDefaultSuites = suitesDir.exists() && suitesDir.listFiles()?.any { it.name.endsWith('.xml') }
+
+    // Если есть хотя бы один из этих признаков — нужно запускать тесты
+    def shouldRun = isTestSuitesProvided || isWfNamesProvided || hasDefaultSuites
+
+    if (!shouldRun) {
+        logger.lifecycle("❗ Задача test будет пропущена: не переданы параметры и не найдены дефолтные тестовые сьюты в $basePath")
+    }
+
+    return shouldRun
+}
+
+// Конфигурация задачи test
+tasks.named("test") {
+
+    // Используем onlyIf, чтобы вообще не конфигурировать задачу test, если запуск не нужен
+    onlyIf { shouldRunTestTask() }
+
+    // Указываем, что используем TestNG как движок для тестов
+    useTestNG {
+        def additionalETLSuite = project.etlSuiteName
+        def basePath = 'src/test/resources/suites/'
+        def fileExtension = '.xml'
+        def suiteNames = []
+
+        // Получаем значения параметров, переданных через командную строку или Jenkins
+        def testSuitesParam = project.hasProperty('testSuites') ? project.testSuites : null
+        def wfNamesParam = System.getProperty("wfNames")
+
+        // Формируем список сьют-файлов в зависимости от параметров
+        if (testSuitesParam) {
+            // Если передан параметр testSuites — разбиваем по запятой и добавляем в список
+            suiteNames = testSuitesParam.split(',\\s*').collect { it.trim() }
+
+            // Если также указан wfNames, добавляем дополнительную ETL-сюту
+            if (wfNamesParam && !wfNamesParam.trim().isEmpty()) {
+                suiteNames << additionalETLSuite
+                logger.warn("Добавлена дополнительная ETL-сюита")
+            }
+        } else if (wfNamesParam && !wfNamesParam.trim().isEmpty()) {
+            // Если testSuites не передан, но есть wfNames — добавляем только ETL-сюиту
+            suiteNames << additionalETLSuite
+            logger.warn("Добавлена дополнительная ETL-сюита")
+        } else {
+            // Если ничего не передано, пытаемся найти все .xml-файлы в директории по умолчанию
+            def suitesDir = new File(basePath)
+            if (suitesDir.exists() && suitesDir.isDirectory()) {
+                suiteNames = suitesDir.listFiles()
+                        .findAll { it.name.endsWith('.xml') }
+                        .collect { it.name.replaceAll(/\.xml$/, '') }
+                logger.warn("❕ Параметры не переданы, запускаем все сьюты из $basePath")
+            }
+            // Если директории нет — никаких сьютов не добавляется. Прерывание НЕ требуется, так как onlyIf уже всё отфильтровал
+        }
+
+        // Преобразуем названия в абсолютные пути к xml-файлам
+        def resolvedPaths = suiteNames.collect {
+            def fileName = it.endsWith(fileExtension) ? it : it + fileExtension
+            new File(fileName).isAbsolute() ? fileName : basePath + fileName
+        }
+
+        // Отфильтровываем существующие и несуществующие файлы
+        def validSuites = resolvedPaths.findAll { new File(it).exists() }
+        def invalidSuites = resolvedPaths.findAll { !new File(it).exists() }
+
+        // Выводим предупреждение о несуществующих сьютах
+        if (!invalidSuites.isEmpty()) {
+            logger.warn("⚠️ Следующие сьют-файлы не найдены и будут проигнорированы:")
+            invalidSuites.each {
+                def nameScheme = new File(it).name.replaceAll(/\.xml$/, '')
+                logger.warn("- отсутствует: $nameScheme")
+            }
+        }
+
+        // Запускаем тесты только по найденным suite-файлам
+        if (!validSuites.isEmpty()) {
+            suites validSuites as String[]
+        } else {
+            // Если не найден ни один подходящий suite-файл — логируем и не делаем ничего (задача всё равно будет пропущена по onlyIf)
+            logger.warn("❌ Не найдено ни одного валидного suite-файла. Задача test будет пропущена.")
+        }
+    }
+
+    // Пробрасываем системные параметры в JVM
+    systemProperty "wfNames", System.getProperty("wfNames", "")
+    systemProperty "repoName", System.getProperty("repoName", "")
+    systemProperty "issueKey", System.getProperty("issueKey", "")
+
+    // Генерация отчета (если настроено)
+    // finalizedBy allureReport
+}
